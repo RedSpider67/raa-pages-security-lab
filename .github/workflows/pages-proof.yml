@@ -1,0 +1,57 @@
+name: Bounded Pages symlink proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-proof
+  cancel-in-progress: false
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify boundary and scrub before upload
+        id: proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -L checkout-config
+          test "$(readlink checkout-config)" = ".git/config"
+
+          auth_present=false
+          if grep -a -q 'AUTHORIZATION: basic ' checkout-config; then
+            auth_present=true
+          fi
+          test "$auth_present" = true
+
+          git config --local --unset-all 'http.https://github.com/.extraheader'
+          ! grep -a -q 'AUTHORIZATION: basic ' checkout-config
+          unlink checkout-config
+
+          mkdir -p _site
+          cp index.html _site/index.html
+          printf '%s\n' \
+            'checkout_auth_visible_via_alias=true' \
+            'checkout_auth_removed_before_upload=true' \
+            'alias_removed_before_upload=true' > _site/proof.txt
+
+      - name: Upload sanitized Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+      - name: Deploy sanitized proof
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
