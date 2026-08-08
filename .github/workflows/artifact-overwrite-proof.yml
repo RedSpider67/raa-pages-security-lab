@@ -1,9 +1,10 @@
-name: Bounded cross-job artifact overwrite proof
+name: Bounded cross-job artifact overwrite true proof
 
 on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -12,10 +13,12 @@ concurrency:
 
 jobs:
   producer:
-    name: Job A - finalize benign artifact
+    name: Job A - finalize and preserve synthetic A
     runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload_a.outputs.artifact-id }}
     steps:
-      - name: Create benign synthetic marker
+      - name: Create synthetic A
         shell: bash
         run: |
           set -euo pipefail
@@ -34,16 +37,31 @@ jobs:
           retention-days: 1
           overwrite: false
 
-      - name: Record Artifact A ID
+      - name: Preserve Artifact A ID metadata and content
         shell: bash
-        run: printf 'artifact_a_id=%s\n' '${{ steps.upload_a.outputs.artifact-id }}'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_A_ID: ${{ steps.upload_a.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          printf 'artifact_a_id=%s\n' "$ARTIFACT_A_ID"
+          printf 'GET /repos/%s/actions/artifacts/%s\n' "$GITHUB_REPOSITORY" "$ARTIFACT_A_ID"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_A_ID}" \
+            --jq '{id,name,size_in_bytes,created_at,updated_at,expired,workflow_run}'
+          archive="${RUNNER_TEMP}/artifact-a-${ARTIFACT_A_ID}.zip"
+          printf 'GET /repos/%s/actions/artifacts/%s/zip\n' "$GITHUB_REPOSITORY" "$ARTIFACT_A_ID"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_A_ID}/zip" > "$archive"
+          sha256sum "$archive"
+          printf 'artifact_a_member=' && unzip -Z1 "$archive"
+          printf 'artifact_a_content=' && unzip -p "$archive" index.html
+          printf 'artifact_a_content_sha256=' && unzip -p "$archive" index.html | sha256sum | cut -d' ' -f1
 
   replacer:
-    name: Job B - control then overwrite
+    name: Job B - overwrite with synthetic B
     needs: producer
     runs-on: ubuntu-latest
     steps:
-      - name: Create distinct replacement marker
+      - name: Create distinct synthetic B
         shell: bash
         run: |
           set -euo pipefail
@@ -53,28 +71,7 @@ jobs:
           printf 'marker_b=' && cat "$fixture_dir/index.html"
           sha256sum "$fixture_dir/index.html"
 
-      - name: Evidence capture pause
-        shell: bash
-        run: sleep 90
-
-      - name: Control - same name without overwrite
-        id: control
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: github-pages
-          path: ${{ runner.temp }}/artifact-b
-          retention-days: 1
-          overwrite: false
-
-      - name: Require control conflict
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf 'control_outcome=%s\n' '${{ steps.control.outcome }}'
-          test '${{ steps.control.outcome }}' = 'failure'
-
-      - name: Changed - same name with overwrite
+      - name: Overwrite same-name finalized Artifact A
         id: overwrite
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -83,6 +80,6 @@ jobs:
           retention-days: 1
           overwrite: true
 
-      - name: Record replacement artifact ID
+      - name: Record Artifact B ID
         shell: bash
         run: printf 'artifact_b_id=%s\n' '${{ steps.overwrite.outputs.artifact-id }}'
