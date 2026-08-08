@@ -1,0 +1,209 @@
+name: Bounded post-approval Pages artifact swap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: post-approval-artifact-swap
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build - finalize synthetic A
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-a-id: ${{ steps.upload_a.outputs.artifact-id }}
+      artifact-a-digest: ${{ steps.upload_a.outputs.artifact-digest }}
+    steps:
+      - name: Create valid synthetic Pages artifact A
+        shell: bash
+        run: |
+          set -euo pipefail
+          site_dir="${RUNNER_TEMP}/site-a"
+          upload_dir="${RUNNER_TEMP}/upload-a"
+          mkdir -p "$site_dir" "$upload_dir"
+          printf 'RAA_POST_APPROVAL_SWAP_A_%s_%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > "$site_dir/index.html"
+          tar --dereference --hard-dereference --directory "$site_dir" -cvf "$upload_dir/artifact.tar" .
+          printf 'artifact_a_marker=' && cat "$site_dir/index.html"
+          printf 'artifact_a_marker_sha256=' && sha256sum "$site_dir/index.html" | cut -d' ' -f1
+          printf 'artifact_a_tar_sha256=' && sha256sum "$upload_dir/artifact.tar" | cut -d' ' -f1
+          tar -tvf "$upload_dir/artifact.tar"
+
+      - name: Upload and finalize Artifact A
+        id: upload_a
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/upload-a/artifact.tar
+          retention-days: 1
+          overwrite: false
+
+      - name: Preserve sole Artifact A metadata and bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_A_ID: ${{ steps.upload_a.outputs.artifact-id }}
+          ARTIFACT_A_DIGEST: ${{ steps.upload_a.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          printf 'artifact_a_id=%s\nartifact_a_upload_digest=%s\n' "$ARTIFACT_A_ID" "$ARTIFACT_A_DIGEST"
+          inventory="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100")"
+          printf '%s\n' "$inventory" | jq '{total_count, artifacts: [.artifacts[] | {id,name,size_in_bytes,created_at,updated_at,expired,workflow_run}]}'
+          count="$(printf '%s\n' "$inventory" | jq '[.artifacts[] | select(.name == "github-pages")] | length')"
+          sole_id="$(printf '%s\n' "$inventory" | jq -r '[.artifacts[] | select(.name == "github-pages")][0].id')"
+          test "$count" = "1"
+          test "$sole_id" = "$ARTIFACT_A_ID"
+          archive="${RUNNER_TEMP}/artifact-a-${ARTIFACT_A_ID}.zip"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_A_ID}/zip" > "$archive"
+          printf 'artifact_a_zip_sha256=' && sha256sum "$archive" | cut -d' ' -f1
+          unzip -Z1 "$archive"
+          unzip -p "$archive" artifact.tar > "${RUNNER_TEMP}/verified-a.tar"
+          printf 'artifact_a_downloaded_tar_sha256=' && sha256sum "${RUNNER_TEMP}/verified-a.tar" | cut -d' ' -f1
+          printf 'artifact_a_downloaded_marker=' && tar -xOf "${RUNNER_TEMP}/verified-a.tar" ./index.html
+
+  swap:
+    name: Unprotected swap - await approved deploy in_progress
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read-only wait for protected deploy to enter in_progress
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_A_ID: ${{ needs.build.outputs.artifact-a-id }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 1200))
+          while (( SECONDS < deadline )); do
+            jobs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest&per_page=100")"
+            matches="$(printf '%s\n' "$jobs" | jq '[.jobs[] | select(.name == "Protected deploy - approval then B barrier")] | length')"
+            test "$matches" = "1"
+            status="$(printf '%s\n' "$jobs" | jq -r '.jobs[] | select(.name == "Protected deploy - approval then B barrier") | .status')"
+            if [[ "$status" == "in_progress" ]]; then
+              printf 'swap_observed_deploy_in_progress_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+              printf '%s\n' "$jobs" | jq '.jobs[] | select(.name == "Protected deploy - approval then B barrier") | {id,name,status,conclusion,created_at,started_at,run_attempt,head_sha,url,html_url}'
+              break
+            fi
+            if [[ "$status" == "completed" ]]; then
+              printf 'protected deploy completed before swap barrier\n' >&2
+              exit 31
+            fi
+            sleep 5
+          done
+          [[ "${status:-}" == "in_progress" ]]
+          inventory="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100")"
+          count="$(printf '%s\n' "$inventory" | jq '[.artifacts[] | select(.name == "github-pages")] | length')"
+          sole_id="$(printf '%s\n' "$inventory" | jq -r '[.artifacts[] | select(.name == "github-pages")][0].id')"
+          test "$count" = "1"
+          test "$sole_id" = "$ARTIFACT_A_ID"
+          printf 'swap_pre_overwrite_inventory_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+          printf '%s\n' "$inventory" | jq '{total_count, artifacts: [.artifacts[] | {id,name,size_in_bytes,created_at,updated_at,expired,workflow_run}]}'
+
+      - name: Create valid distinct synthetic Pages artifact B
+        shell: bash
+        run: |
+          set -euo pipefail
+          site_dir="${RUNNER_TEMP}/site-b"
+          upload_dir="${RUNNER_TEMP}/upload-b"
+          mkdir -p "$site_dir" "$upload_dir"
+          printf 'RAA_POST_APPROVAL_SWAP_B_%s_%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > "$site_dir/index.html"
+          tar --dereference --hard-dereference --directory "$site_dir" -cvf "$upload_dir/artifact.tar" .
+          printf 'artifact_b_created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+          printf 'artifact_b_marker=' && cat "$site_dir/index.html"
+          printf 'artifact_b_marker_sha256=' && sha256sum "$site_dir/index.html" | cut -d' ' -f1
+          printf 'artifact_b_tar_sha256=' && sha256sum "$upload_dir/artifact.tar" | cut -d' ' -f1
+          tar -tvf "$upload_dir/artifact.tar"
+
+      - name: Overwrite A with finalized Artifact B
+        id: upload_b
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/upload-b/artifact.tar
+          retention-days: 1
+          overwrite: true
+
+      - name: Prove sole Artifact B finalization
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_A_ID: ${{ needs.build.outputs.artifact-a-id }}
+          ARTIFACT_B_ID: ${{ steps.upload_b.outputs.artifact-id }}
+          ARTIFACT_B_DIGEST: ${{ steps.upload_b.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          test "$ARTIFACT_B_ID" != "$ARTIFACT_A_ID"
+          inventory="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100")"
+          count="$(printf '%s\n' "$inventory" | jq '[.artifacts[] | select(.name == "github-pages")] | length')"
+          sole_id="$(printf '%s\n' "$inventory" | jq -r '[.artifacts[] | select(.name == "github-pages")][0].id')"
+          test "$count" = "1"
+          test "$sole_id" = "$ARTIFACT_B_ID"
+          printf 'artifact_b_finalized_verified_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+          printf 'artifact_b_id=%s\nartifact_b_upload_digest=%s\n' "$ARTIFACT_B_ID" "$ARTIFACT_B_DIGEST"
+          printf '%s\n' "$inventory" | jq '{total_count, artifacts: [.artifacts[] | {id,name,size_in_bytes,created_at,updated_at,expired,workflow_run}]}'
+          archive="${RUNNER_TEMP}/artifact-b-${ARTIFACT_B_ID}.zip"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_B_ID}/zip" > "$archive"
+          printf 'artifact_b_zip_sha256=' && sha256sum "$archive" | cut -d' ' -f1
+          unzip -p "$archive" artifact.tar > "${RUNNER_TEMP}/verified-b.tar"
+          printf 'artifact_b_downloaded_tar_sha256=' && sha256sum "${RUNNER_TEMP}/verified-b.tar" | cut -d' ' -f1
+          printf 'artifact_b_downloaded_marker=' && tar -xOf "${RUNNER_TEMP}/verified-b.tar" ./index.html
+
+  deploy:
+    name: Protected deploy - approval then B barrier
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deterministic post-approval barrier for finalized B
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_A_ID: ${{ needs.build.outputs.artifact-a-id }}
+        run: |
+          set -euo pipefail
+          printf 'protected_barrier_started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+          deadline=$((SECONDS + 600))
+          while (( SECONDS < deadline )); do
+            inventory="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100")"
+            count="$(printf '%s\n' "$inventory" | jq '[.artifacts[] | select(.name == "github-pages")] | length')"
+            if (( count > 1 )); then
+              printf 'stop: more than one github-pages artifact\n' >&2
+              exit 41
+            fi
+            if (( count == 1 )); then
+              sole_id="$(printf '%s\n' "$inventory" | jq -r '[.artifacts[] | select(.name == "github-pages")][0].id')"
+              if [[ "$sole_id" != "$ARTIFACT_A_ID" ]]; then
+                archive="${RUNNER_TEMP}/barrier-b-${sole_id}.zip"
+                gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${sole_id}/zip" > "$archive"
+                unzip -p "$archive" artifact.tar > "${RUNNER_TEMP}/barrier-b.tar"
+                expected="RAA_POST_APPROVAL_SWAP_B_${GITHUB_RUN_ID}_${GITHUB_SHA}"
+                actual="$(tar -xOf "${RUNNER_TEMP}/barrier-b.tar" ./index.html)"
+                test "$actual" = "$expected"
+                printf 'protected_barrier_released_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+                printf 'protected_barrier_artifact_b_id=%s\n' "$sole_id"
+                printf 'protected_barrier_artifact_b_zip_sha256=' && sha256sum "$archive" | cut -d' ' -f1
+                printf 'protected_barrier_artifact_b_tar_sha256=' && sha256sum "${RUNNER_TEMP}/barrier-b.tar" | cut -d' ' -f1
+                printf 'protected_barrier_artifact_b_marker=%s\n' "$actual"
+                printf '%s\n' "$inventory" | jq '{total_count, artifacts: [.artifacts[] | {id,name,size_in_bytes,created_at,updated_at,expired,workflow_run}]}'
+                break
+              fi
+            fi
+            sleep 3
+          done
+          test -n "${sole_id:-}"
+          test "$sole_id" != "$ARTIFACT_A_ID"
+
+      - name: Deploy sole post-approval Artifact B
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
