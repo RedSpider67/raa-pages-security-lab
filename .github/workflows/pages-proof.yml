@@ -1,4 +1,4 @@
-name: Bounded Pages path-normalization differential
+name: Bounded Pages rerun artifact attempt binding
 
 on:
   workflow_dispatch:
@@ -13,54 +13,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  proof:
+  probe:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Create synthetic regular-file matrix
+      - name: Create owned attempt-1 marker
+        if: ${{ github.run_attempt == 1 }}
         shell: bash
         run: |
           set -euo pipefail
-          fixture_dir="${RUNNER_TEMP}/pages-byte-fixture"
+          fixture_dir="${RUNNER_TEMP}/pages-attempt-binding"
           mkdir -p "$fixture_dir"
+          printf 'RAA_PAGES_ATTEMPT_BINDING_%s_ATTEMPT1\n' "${GITHUB_RUN_ID}" > "$fixture_dir/index.html"
 
-          names=(
-            'control-a.txt'
-            'control-b.txt'
-            'semi.txt'
-            'semi.txt;v=1'
-            'linebreak.txt'
-            $'linebreak.txt\nv=1'
-            'space.txt'
-            ' space.txt'
-            'space.txt '
-          )
-          markers=(
-            'RAA_CONTROL_A_20260808'
-            'RAA_CONTROL_B_20260808'
-            'RAA_SEMI_CANON_20260808'
-            'RAA_SEMI_SUFFIX_20260808'
-            'RAA_LINEBREAK_CANON_20260808'
-            'RAA_LINEBREAK_LF_20260808'
-            'RAA_SPACE_CANON_20260808'
-            'RAA_SPACE_LEADING_20260808'
-            'RAA_SPACE_TRAILING_20260808'
-          )
-
-          test "${#names[@]}" -eq "${#markers[@]}"
-          for i in "${!names[@]}"; do
-            printf '%s\n' "${markers[$i]}" > "$fixture_dir/${names[$i]}"
-            test -f "$fixture_dir/${names[$i]}"
-            test ! -L "$fixture_dir/${names[$i]}"
-          done
-
-      - name: Upload synthetic Pages artifact
+      - name: Upload attempt-1 Pages artifact
+        if: ${{ github.run_attempt == 1 }}
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: ${{ runner.temp }}/pages-byte-fixture
+          path: ${{ runner.temp }}/pages-attempt-binding
 
-      - name: Deploy synthetic filename matrix
+      - name: Deploy Pages artifact
         id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+
+      - name: Fail attempt 1 solely to permit one failed-job rerun
+        if: ${{ github.run_attempt == 1 }}
+        shell: bash
+        run: exit 1
