@@ -1,0 +1,88 @@
+name: Bounded cross-job artifact overwrite proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: artifact-overwrite-proof
+  cancel-in-progress: false
+
+jobs:
+  producer:
+    name: Job A - finalize benign artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create benign synthetic marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_dir="${RUNNER_TEMP}/artifact-a"
+          mkdir -p "$fixture_dir"
+          printf 'RAA_CROSS_JOB_ARTIFACT_A_%s\n' "${GITHUB_RUN_ID}" > "$fixture_dir/index.html"
+          printf 'marker_a=' && cat "$fixture_dir/index.html"
+          sha256sum "$fixture_dir/index.html"
+
+      - name: Upload and finalize Artifact A
+        id: upload_a
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/artifact-a
+          retention-days: 1
+          overwrite: false
+
+      - name: Record Artifact A ID
+        shell: bash
+        run: printf 'artifact_a_id=%s\n' '${{ steps.upload_a.outputs.artifact-id }}'
+
+  replacer:
+    name: Job B - control then overwrite
+    needs: producer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create distinct replacement marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_dir="${RUNNER_TEMP}/artifact-b"
+          mkdir -p "$fixture_dir"
+          printf 'RAA_CROSS_JOB_ARTIFACT_B_%s\n' "${GITHUB_RUN_ID}" > "$fixture_dir/index.html"
+          printf 'marker_b=' && cat "$fixture_dir/index.html"
+          sha256sum "$fixture_dir/index.html"
+
+      - name: Evidence capture pause
+        shell: bash
+        run: sleep 90
+
+      - name: Control - same name without overwrite
+        id: control
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/artifact-b
+          retention-days: 1
+          overwrite: false
+
+      - name: Require control conflict
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'control_outcome=%s\n' '${{ steps.control.outcome }}'
+          test '${{ steps.control.outcome }}' = 'failure'
+
+      - name: Changed - same name with overwrite
+        id: overwrite
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/artifact-b
+          retention-days: 1
+          overwrite: true
+
+      - name: Record replacement artifact ID
+        shell: bash
+        run: printf 'artifact_b_id=%s\n' '${{ steps.overwrite.outputs.artifact-id }}'
