@@ -1,44 +1,45 @@
-name: Bounded Pages rerun artifact attempt binding
+name: Bounded Pages protected-approval attempt binding
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages-proof
   cancel-in-progress: false
 
 jobs:
-  probe:
+  build:
     runs-on: ubuntu-latest
+    steps:
+      - name: Create owned lower-trust marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_RUN_ATTEMPT}" = "1"
+          fixture_dir="${RUNNER_TEMP}/pages-protected-attempt-binding"
+          mkdir -p "$fixture_dir"
+          printf 'RAA_PAGES_PROTECTED_ATTEMPT_BINDING_%s_ATTEMPT1_ACTOR_%s\n' \
+            "${GITHUB_RUN_ID}" "${GITHUB_ACTOR}" > "$fixture_dir/index.html"
+
+      - name: Upload attempt-1 Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/pages-protected-attempt-binding
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Create owned attempt-1 marker
-        if: ${{ github.run_attempt == 1 }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          fixture_dir="${RUNNER_TEMP}/pages-attempt-binding"
-          mkdir -p "$fixture_dir"
-          printf 'RAA_PAGES_ATTEMPT_BINDING_%s_ATTEMPT1\n' "${GITHUB_RUN_ID}" > "$fixture_dir/index.html"
-
-      - name: Upload attempt-1 Pages artifact
-        if: ${{ github.run_attempt == 1 }}
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: ${{ runner.temp }}/pages-attempt-binding
 
       - name: Deploy Pages artifact
         id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
-
-      - name: Fail attempt 1 solely to permit one failed-job rerun
-        if: ${{ github.run_attempt == 1 }}
-        shell: bash
-        run: exit 1
